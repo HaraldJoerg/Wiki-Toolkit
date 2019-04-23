@@ -246,7 +246,7 @@ sub _retrieve_node_data {
     $sth->execute($args{name},$data{version}) or croak $dbh->errstr;
 
     my %metadata;
-    while ( my ($type, $val) = $self->charset_decode( $sth->fetchrow_array ) ) {
+    while ( my ($type, $val) = $sth->fetchrow_array ) {
         if ( defined $metadata{$type} ) {
             push @{$metadata{$type}}, $val;
         } else {
@@ -271,7 +271,7 @@ sub _retrieve_node_content {
     my $text_source;
     if ( $args{version} ) {
         # Version given - get that version, and the content for that version
-        $version_sql_val = $dbh->quote($self->charset_encode($args{version}));
+        $version_sql_val = $dbh->quote($args{version});
         $text_source = "content";
     } else {
         # No version given, grab latest version (and content for that)
@@ -284,9 +284,9 @@ sub _retrieve_node_content {
          . "     node.moderate "
          . "FROM node "
          . "INNER JOIN content ON (id = node_id) "
-         . "WHERE name=" . $dbh->quote($self->charset_encode($args{name}))
+         . "WHERE name=" . $dbh->quote($args{name})
          . " AND content.version=" . $version_sql_val;
-    my @results = $self->charset_decode( $dbh->selectrow_array($sql) );
+    my @results = $dbh->selectrow_array($sql);
     @results = ("", 0, "") unless scalar @results;
     my %data;
     @data{ qw( content version last_modified moderated node_requires_moderation ) } = @results;
@@ -414,7 +414,7 @@ sub list_backlinks {
     my $sth = $dbh->prepare($sql);
     $sth->execute or croak $dbh->errstr;
     my @backlinks;
-    while ( my ($backlink) = $self->charset_decode( $sth->fetchrow_array ) ) {
+    while ( my ($backlink) = $sth->fetchrow_array ) {
         push @backlinks, $backlink;
     }
     return @backlinks;
@@ -446,7 +446,7 @@ sub list_dangling_links {
     my $sth = $dbh->prepare($sql);
     $sth->execute or croak $dbh->errstr;
     my @links;
-    while ( my ($link) = $self->charset_decode( $sth->fetchrow_array ) ) {
+    while ( my ($link) = $sth->fetchrow_array ) {
         push @links, $link;
     }
     return @links;
@@ -564,8 +564,7 @@ sub write_node_post_locking {
             ."VALUES (?, ?, ?, ?, ?)";
         my $add_sth = $dbh->prepare($add_sql);
         $add_sth->execute(
-            map{ $self->charset_encode($_) }
-                ($node, $version, $node_content, $timestamp, $requires_moderation)
+            $node, $version, $node_content, $timestamp, $requires_moderation
         ) or croak "Error updating database: " . DBI->errstr;
     }
 
@@ -587,11 +586,14 @@ sub write_node_post_locking {
 
         # Update the node only if node doesn't require moderation
         if(!$node_requires_moderation) {
-            $sql = "UPDATE node SET version=" . $dbh->quote($version)
-             . ", text=" . $dbh->quote($self->charset_encode($content))
-             . ", modified=" . $dbh->quote($timestamp)
-             . " WHERE name=" . $dbh->quote($self->charset_encode($node));
-            $dbh->do($sql) or croak "Error updating database: " . DBI->errstr;
+            $sql = "UPDATE node SET version=?"
+                . ", text=?"
+                . ",modified=?"
+                . " WHERE NAME=?";
+            my $sth = $dbh->prepare($sql);
+            $sth->execute(
+                $version,$content,$timestamp,$node
+                      )  or croak "Error updating database: " . DBI->errstr;
         }
 
         # You can't use this to enable moderation on an existing node
@@ -608,17 +610,16 @@ sub write_node_post_locking {
         ."VALUES (?, ?, ?, ?, ?)";
     my $add_sth = $dbh->prepare($add_sql);
     $add_sth->execute(
-        map { $self->charset_encode($_) }
-            ($node_id, $version, $content, $timestamp, (1-$node_requires_moderation))
+            $node_id, $version, $content, $timestamp, (1-$node_requires_moderation)
     ) or croak "Error updating database: " . DBI->errstr;
 
 
     # Update the backlinks.
     $dbh->do("DELETE FROM internal_links WHERE link_from="
-             . $dbh->quote($self->charset_encode($node)) ) or croak $dbh->errstr;
+             . $dbh->quote($node) ) or croak $dbh->errstr;
     foreach my $links_to ( @links_to ) {
         $sql = "INSERT INTO internal_links (link_from, link_to) VALUES ("
-             . join(", ", map { $dbh->quote($self->charset_encode($_)) } ( $node, $links_to ) ) . ")";
+             . join(", ", map { $dbh->quote($_) } ( $node, $links_to ) ) . ")";
         # Better to drop a backlink or two than to lose the whole update.
         # Shevek wants a case-sensitive wiki, Jerakeen wants a case-insensitive
         # one, MySQL compares case-sensitively on varchars unless you add
@@ -657,7 +658,6 @@ sub write_node_post_locking {
 
             foreach my $value ( @values ) {
                 $add_sth->execute(
-                    map { $self->charset_encode($_) }
                         ( $node_id, $version, $type, $value )
                 ) or croak $dbh->errstr;
             }
@@ -666,7 +666,6 @@ sub write_node_post_locking {
             my $type_to_store  = "__" . $type . "__checksum";
             my $value_to_store = $self->_checksum_hashes( @values );
             $add_sth->execute(
-                  map { $self->charset_encode($_) }
                       ( $node_id, $version, $type_to_store, $value_to_store )
             )  or croak $dbh->errstr;
         }
@@ -942,7 +941,7 @@ sub moderate_node {
             ."WHERE id = ?";
         my $newv_sth = $dbh->prepare($newv_sql);
         $newv_sth->execute(
-            $version, $self->charset_encode($new_data{content}), 
+            $version, $new_data{content}, 
             $new_data{last_modified}, $node_id
         ) or croak $dbh->errstr;
     } else {
@@ -1376,7 +1375,7 @@ sub _find_recent_changes_by_criteria {
                          . " AND "
                          . $self->_get_comparison_sql(
                                           thing1      => "$mdt.metadata_value",
-                                          thing2      => $dbh->quote( $self->charset_encode($value) ),
+                                          thing2      => $dbh->quote( $value ),
                                           Ignore_case => $ignore_case,
                                                      )
                          . " )";
@@ -1421,7 +1420,7 @@ sub _find_recent_changes_by_criteria {
                          . " AND "
                          . $self->_get_comparison_sql(
                                           thing1      => "$mdt.metadata_value",
-                                          thing2      => $dbh->quote( $self->charset_encode($value) ),
+                                          thing2      => $dbh->quote( $value ),
                                           ignore_case => $ignore_case,
                                                      )
                          . " )";
@@ -1513,7 +1512,7 @@ sub _find_recent_changes_by_criteria {
                                   WHERE name=?
                                   AND metadata.version=?" );
         $sth->execute( $find->{name}, $find->{version} );
-        while ( my ($type, $value) = $self->charset_decode( $sth->fetchrow_array ) ) {
+        while ( my ($type, $value) = $sth->fetchrow_array ) {
         if ( defined $metadata{$type} ) {
                 push @{$metadata{$type}}, $value;
         } else {
@@ -1558,7 +1557,7 @@ sub list_all_nodes {
     } else {
         my $sql = "SELECT name FROM node;";
         my $raw_nodes = $dbh->selectall_arrayref($sql); 
-        @nodes = ( map { $self->charset_decode( $_->[0] ) } (@$raw_nodes) );
+        @nodes = ( map { $_->[0]  } @$raw_nodes );
     }
     return @nodes;
 }
@@ -1723,7 +1722,7 @@ sub list_nodes_by_metadata {
     my $sql =
          $self->_get_list_by_metadata_sql( ignore_case => $args{ignore_case} );
     my $sth = $dbh->prepare( $sql );
-    $sth->execute( $type, $self->charset_encode($value) );
+    $sth->execute( $type, $value );
     my @nodes;
     while ( my ($id, $node) = $sth->fetchrow_array ) {
         push @nodes, $node;
@@ -2045,7 +2044,7 @@ sub list_metadata_by_type {
     $sth->execute($type);
 
     my $values = $sth->fetchall_arrayref([0]);
-    return ( map { $self->charset_decode( $_->[0] ) } (@$values) );
+    return ( map { $_->[0] } @$values );
 }
 
 
@@ -2080,7 +2079,7 @@ sub list_metadata_names {
     $sth->execute();
 
     my $types = $sth->fetchall_arrayref([0]);
-    return ( map { $self->charset_decode( $_->[0] ) } (@$types) );
+    return ( map { $_->[0] } @$types );
 }
 
 
